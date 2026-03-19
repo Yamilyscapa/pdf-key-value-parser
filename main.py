@@ -5,7 +5,6 @@ import importlib
 import json
 import re
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +41,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--include-raw",
         action="store_true",
-        help="Include raw extracted lines for each page",
+        help="Include verbose debug extraction data",
     )
     return parser.parse_args(argv)
 
@@ -262,6 +261,20 @@ def resolve_output_path(input_pdf: Path, output: str | None) -> Path:
     return input_pdf.with_suffix(".json")
 
 
+def duplicate_keys(fields: dict[str, Any]) -> list[str]:
+    return [key for key, value in fields.items() if isinstance(value, list)]
+
+
+def count_field_items(fields: dict[str, Any]) -> int:
+    count = 0
+    for value in fields.values():
+        if isinstance(value, list):
+            count += len(value)
+        else:
+            count += 1
+    return count
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
     input_pdf = Path(args.input_pdf)
     if not input_pdf.exists():
@@ -276,10 +289,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
         selected_pages = parse_pages_spec(args.pages, doc.page_count)
 
-        pages_payload: list[dict[str, Any]] = []
-        all_field_items: list[dict[str, Any]] = []
         all_fields: dict[str, Any] = {}
         ocr_required_pages: list[int] = []
+        debug_pages: list[dict[str, Any]] = []
 
         for page_number in selected_pages:
             page = doc[page_number - 1]
@@ -288,38 +300,45 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
             for item in field_items:
                 merge_duplicate_field(all_fields, item["key"], item["value"])
-            all_field_items.extend(field_items)
 
             if ocr_required:
                 ocr_required_pages.append(page_number)
 
-            page_payload: dict[str, Any] = {
-                "page_number": page_number,
-                "width": float(page.rect.width),
-                "height": float(page.rect.height),
-                "field_items": field_items,
-                "fields": page_fields,
-                "ocr_required": ocr_required,
-            }
             if args.include_raw:
-                page_payload["raw_lines"] = lines
-            pages_payload.append(page_payload)
+                debug_pages.append(
+                    {
+                        "page_number": page_number,
+                        "width": float(page.rect.width),
+                        "height": float(page.rect.height),
+                        "ocr_required": ocr_required,
+                        "fields": page_fields,
+                        "field_items": field_items,
+                        "raw_lines": lines,
+                    }
+                )
 
-        return {
+        payload = {
             "source": str(input_pdf.resolve()),
-            "parsed_at": datetime.now(timezone.utc).isoformat(),
-            "library": {
-                "name": "PyMuPDF",
-                "version": getattr(fitz, "__version__", None) or getattr(fitz, "VersionBind", None),
-            },
-            "document_page_count": doc.page_count,
-            "selected_page_count": len(selected_pages),
-            "metadata": json_safe(doc.metadata),
-            "pages": pages_payload,
-            "field_items": all_field_items,
+            "page_count": len(selected_pages),
             "fields": all_fields,
+            "duplicate_keys": duplicate_keys(all_fields),
             "ocr_required_pages": ocr_required_pages,
         }
+
+        if args.include_raw:
+            payload["debug"] = {
+                "library": {
+                    "name": "PyMuPDF",
+                    "version": getattr(fitz, "__version__", None)
+                    or getattr(fitz, "VersionBind", None),
+                },
+                "document_page_count": doc.page_count,
+                "selected_pages": selected_pages,
+                "metadata": json_safe(doc.metadata),
+                "pages": debug_pages,
+            }
+
+        return payload
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -337,7 +356,7 @@ def main(argv: list[str] | None = None) -> int:
                 f.write("\n")
 
         print(f"Saved JSON to {output_path}")
-        print(f"Extracted {len(payload['field_items'])} field item(s)")
+        print(f"Extracted {count_field_items(payload['fields'])} field item(s)")
         if payload["ocr_required_pages"]:
             page_list = ", ".join(str(p) for p in payload["ocr_required_pages"])
             print(f"OCR likely required for page(s): {page_list}")
