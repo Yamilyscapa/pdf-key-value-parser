@@ -9,6 +9,8 @@ fitz = importlib.import_module("pymupdf")
 
 FIELD_LINE_RE = re.compile(r"^(?P<raw_key>[^:=\n]{1,120}?)(?P<separator>[:=])(?P<raw_value>.*)$")
 TIME_ONLY_RE = re.compile(r"^\s*\d{1,2}:\d{2}(?:\s*[APap][Mm])?\s*$")
+UUID_RE = re.compile(r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$", re.IGNORECASE)
+FILENAME_UUID_RE = re.compile(r"([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})@.+\.pdf", re.IGNORECASE)
 
 
 def parse_pages_spec(spec: str | None, page_count: int) -> list[int]:
@@ -161,7 +163,7 @@ def merge_duplicate_field(fields: dict[str, Any], key: str, value: str) -> None:
         fields[key] = [current, value]
 
 
-def extract_fields_from_lines(lines: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def extract_fields_from_lines(lines: list[dict[str, Any]], source: str = "") -> tuple[list[dict[str, Any]], dict[str, Any]]:
     field_items: list[dict[str, Any]] = []
     active_index: int | None = None
 
@@ -207,6 +209,24 @@ def extract_fields_from_lines(lines: list[dict[str, Any]]) -> tuple[list[dict[st
     for item in field_items:
         merge_duplicate_field(fields, item["key"], item["value"])
 
+    if fields.get("Folio fiscal") in ("", None):
+        recovered_from_next_line = False
+        for idx, item in enumerate(field_items):
+            if item["key"] == "Folio fiscal":
+                next_uuid = get_next_line_uuid(field_items, idx)
+                if next_uuid:
+                    fields["Folio fiscal"] = next_uuid["uuid"]
+                    del field_items[next_uuid["index"]]
+                    recovered_from_next_line = True
+                    break
+
+        if not recovered_from_next_line:
+            filename_uuid = extract_uuid_from_filename(source)
+            if filename_uuid:
+                fields["foliofiscal"] = filename_uuid
+            else:
+                fields["foliofiscal"] = None
+
     return field_items, fields
 
 
@@ -222,6 +242,24 @@ def json_safe(value: Any) -> Any:
 
 def duplicate_keys(fields: dict[str, Any]) -> list[str]:
     return [key for key, value in fields.items() if isinstance(value, list)]
+
+
+def get_next_line_uuid(field_items: list[dict[str, Any]], folio_fiscal_index: int) -> dict[str, Any] | None:
+    next_index = folio_fiscal_index + 1
+    if next_index >= len(field_items):
+        return None
+    next_item = field_items[next_index]
+    last_line = next_item.get("raw_lines", [])[-1] if next_item.get("raw_lines") else None
+    if last_line and UUID_RE.match(last_line.strip()):
+        return {"uuid": last_line.strip(), "index": next_index}
+    return None
+
+
+def extract_uuid_from_filename(source: str) -> str | None:
+    match = FILENAME_UUID_RE.search(source)
+    if match:
+        return match.group(1)
+    return None
 
 
 def parse_pdf_bytes(
@@ -247,10 +285,14 @@ def parse_pdf_bytes(
         for page_number in selected_pages:
             page = doc[page_number - 1]
             lines, ocr_required = extract_lines(page, page_number)
-            field_items, page_fields = extract_fields_from_lines(lines)
+            field_items, page_fields = extract_fields_from_lines(lines, source)
 
             for item in field_items:
                 merge_duplicate_field(all_fields, item["key"], item["value"])
+
+            for folio_key in ("Folio fiscal", "foliofiscal"):
+                if folio_key in page_fields:
+                    all_fields[folio_key] = page_fields[folio_key]
 
             if ocr_required:
                 ocr_required_pages.append(page_number)
