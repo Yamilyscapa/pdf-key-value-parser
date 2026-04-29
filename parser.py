@@ -314,7 +314,7 @@ def parse_pdf_bytes(
             for item in field_items:
                 merge_duplicate_field(all_fields, item["key"], item["value"])
 
-            for folio_key in ("Folio fiscal", "foliofiscal"):
+            for folio_key in ("Folio Fiscal", "Folio fiscal", "foliofiscal"):
                 if folio_key in page_fields:
                     all_fields[folio_key] = page_fields[folio_key]
 
