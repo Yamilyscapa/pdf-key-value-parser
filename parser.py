@@ -209,23 +209,31 @@ def extract_fields_from_lines(lines: list[dict[str, Any]], source: str = "") -> 
     for item in field_items:
         merge_duplicate_field(fields, item["key"], item["value"])
 
-    if fields.get("Folio fiscal") in ("", None):
-        recovered_from_next_line = False
+    folio_value = fields.get("Folio Fiscal") or fields.get("Folio fiscal")
+    needs_recovery = not folio_value or not UUID_RE.match(folio_value)
+
+    if needs_recovery:
+        recovered_from_same_row = False
         for idx, item in enumerate(field_items):
-            if item["key"] == "Folio fiscal":
-                next_uuid = get_next_line_uuid(field_items, idx)
-                if next_uuid:
-                    fields["Folio fiscal"] = next_uuid["uuid"]
-                    del field_items[next_uuid["index"]]
-                    recovered_from_next_line = True
+            if item["key"] == "Folio Fiscal":
+                same_row_uuid = find_uuid_on_same_row(lines, item["bbox"])
+                if same_row_uuid:
+                    fields["Folio Fiscal"] = same_row_uuid
+                    recovered_from_same_row = True
                     break
 
-        if not recovered_from_next_line:
-            filename_uuid = extract_uuid_from_filename(source)
-            if filename_uuid:
-                fields["foliofiscal"] = filename_uuid
+        if not recovered_from_same_row:
+            for idx, item in enumerate(field_items):
+                if item["key"].lower() == "folio fiscal":
+                    next_uuid = get_next_line_uuid(field_items, idx)
+                    if next_uuid:
+                        fields["Folio Fiscal"] = next_uuid["uuid"]
+                        del field_items[next_uuid["index"]]
+                        break
             else:
-                fields["foliofiscal"] = None
+                filename_uuid = extract_uuid_from_filename(source)
+                if not filename_uuid:
+                    fields["foliofiscal"] = None
 
     return field_items, fields
 
@@ -252,6 +260,22 @@ def get_next_line_uuid(field_items: list[dict[str, Any]], folio_fiscal_index: in
     last_line = next_item.get("raw_lines", [])[-1] if next_item.get("raw_lines") else None
     if last_line and UUID_RE.match(last_line.strip()):
         return {"uuid": last_line.strip(), "index": next_index}
+    return None
+
+
+def are_same_row(bbox1: list[float], bbox2: list[float], tolerance: float = 5.0) -> bool:
+    if not bbox1 or not bbox2:
+        return False
+    y1_min, y1_max = bbox1[1], bbox1[3]
+    y2_min, y2_max = bbox2[1], bbox2[3]
+    return (min(y1_max, y2_max) - max(y1_min, y2_min)) > -tolerance
+
+
+def find_uuid_on_same_row(lines: list[dict[str, Any]], field_bbox: list[float]) -> str | None:
+    for line in lines:
+        text = line["text"].strip()
+        if UUID_RE.match(text) and are_same_row(line["bbox"], field_bbox):
+            return text
     return None
 
 
